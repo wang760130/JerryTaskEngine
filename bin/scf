@@ -1,0 +1,698 @@
+#! /bin/bash
+
+USAGE="Usage: scf <command> <other_config>
+	   command: <-v|-?|start|restart|shutdown|jstat|jstack|telnet|list|detect|log|init|check>
+	   other_config: <service-name|service-pid> <interval-time> <delay-time>
+				 <count> <path-url> <-option>
+Example:
+	   scf <-v|version>
+	   scf <-?|help>
+	   scf <list>
+	   scf <detect>
+	   scf <init>
+	   scf <check>
+	   scf <telnet> <service-name>
+	   scf <log> <service-name> <count> <other-param>
+	   scf <start> <service-name>
+	   scf <shutdown> <service-name>
+	   scf <shutdown_now> <service-name>
+	   scf <restart> <service-name> <delay-time>
+	   scf <restart_now> <service-name> <delay-time>
+	   scf <jstat> <-option> <service-name|service-pid> <interval-time> <count>
+	   scf <jstack> <service-name|sesrvice-pid> <count> <path-url>"
+
+SCF_DIR=/opt/scf
+#scf start function
+function scf_start_func()
+{
+	source /etc/profile
+	START_USAGE="scf <start> <service-name>"
+	SYSTEM_PROPERTY=""
+
+# if no args specified, show usage
+	if [ $# -lt 1 ]; then
+		echo $START_USAGE
+		exit 1
+	fi
+
+	cd $SCF_DIR/bin
+
+# get arguments
+	SERVICE_NAME=$1
+	OTHER_SCF_CONFIG=""
+	for((i=2; i<=$#; i++)); do
+		OTHER_SCF_CONFIG=$OTHER_SCF_CONFIG" "${!i}
+	done
+
+#if this service is not shutwodn Please shutdown
+	SERVICE_DIR=$SCF_DIR
+	PID_FILE="$SERVICE_DIR"/tmp/pid/"$SERVICE_NAME"
+
+	if [ -e $PID_FILE ]; then
+		PID_INFO=`cat $PID_FILE`
+		SERVICE_PID=`ps -ef | grep -v grep | grep $PID_INFO | sed -n  '1P' | awk '{print $2}'` 
+		echo $SERVICE_PID
+		if [ $SERVICE_PID ]; then
+			echo "startup fail! Please close the service after to restart!" 
+			echo `date` +"[$SERVICE_NAME] is running" >> ../log/$SERVICE_NAME/monitor.log
+			exit 1 
+		else 
+			echo "This service will startup!"
+			echo `date` +"[$SERVICE_NAME] is starting" >> ../log/$SERVICE_NAME/monitor.log
+		fi
+	fi
+
+
+# check tools.jar
+#if [ ! -f "$JAVA_HOME"/lib/tools.jar ]; then
+#  echo "Can't find tools.jar in JAVA_HOME"
+#  echo "Need a JDK to run javac"
+#  exit 1
+#fi
+
+
+# check service is run
+	javacount=`ps -ef|grep java|grep "=$SERVICE_NAME$" |wc -l`
+#echo "javacount:"$javacount
+	if [ $javacount -ge 1 ] ; then
+		echo "warning: has a [$SERVICE_NAME] is running, please check......................................"
+		exit 1
+	fi
+
+
+
+# get path
+	DIR="$SCF_HOME"bin
+	if [ "$DIR" = "bin" ]; then
+#		echo "no SCF_HOME path"
+		DIR=`dirname "$0"`
+		DIR=`cd "$bin"; pwd`
+	fi
+	PROGNAME=`basename $0`
+	ROOT_PATH="$SCF_DIR"
+	DEPLOY_PATH="$ROOT_PATH"/service/deploy
+	PID_PATH="$ROOT_PATH"/tmp/pid
+	JVM_PATH="$DEPLOY_PATH"/"$SERVICE_NAME"/scf_config.xml
+
+
+# java opts
+	VM_XMS=`cat $JVM_PATH | sed 's#\(.*\)>\(.*\)#\1>#g' |awk '/scf.server.vm.xms/{getline;print}' | sed 's#.*<value>\(.*\)</value>#\1#g'`
+	VM_XMX=`cat $JVM_PATH | sed 's#\(.*\)>\(.*\)#\1>#g' |awk '/scf.server.vm.xmx/{getline;print}' | sed 's#.*<value>\(.*\)</value>#\1#g'`
+	VM_XMN=`cat $JVM_PATH | sed 's#\(.*\)>\(.*\)#\1>#g' |awk '/scf.server.vm.xmn/{getline;print}' | sed 's#.*<value>\(.*\)</value>#\1#g'`
+	if [ $ASYN_LOG_QUEUE_SIZE -eq 0 ]; then
+		ASYN_LOG_QUEUE_SIZE=`cat $JVM_PATH | sed 's#\(.*\)>\(.*\)#\1>#g' |awk '/asyn.log.queue.size/{getline;print}' | sed 's#<value>\(.*\)</value>#\1#g'`
+	fi
+
+	if [ "$VM_XMS" = "" ]; then
+		VM_XMS=2g
+	fi
+
+	if [ "$VM_XMX" = "" ]; then
+		VM_XMX=2g
+	fi
+
+	if [ "$VM_XMN" = "" ]; then
+		VM_XMN=1g
+	fi
+
+	JAVA_OPTS="-Xms$VM_XMS -Xmx$VM_XMX -Xmn$VM_XMN -Xss1024K -XX:PermSize=256m -XX:MaxPermSize=512m -XX:ParallelGCThreads=20 -XX:+UseConcMarkSweepGC -XX:+UseParNewGC -XX:+UseConcMarkSweepGC -XX:+UseCMSCompactAtFullCollection -XX:SurvivorRatio=65536 -XX:MaxTenuringThreshold=0 -XX:CMSInitiatingOccupancyFraction=80 -DSCF.uspcluster=$SERVICE_NAME -Dasyn.log.switch=$ASYN_LOG -Dasyn.log.queue.size=$ASYN_LOG_QUEUE_SIZE"
+	echo "$JAVA_OPTS"
+
+# class path
+	if [ ! $JAVA_HOME ];then
+		CLASS_PATH=.:"$ROOT_PATH"/lib/tools.jar
+	else
+		CLASS_PATH=.:"$JAVA_HOME"/lib/tools.jar
+	fi
+
+	for jar in $ROOT_PATH/lib/*.jar; do
+		CLASS_PATH=$CLASS_PATH:$jar
+	done
+
+
+# main class
+	MAIN_CLASS=com.bj58.spat.scf.server.bootstrap.Main
+
+	if [ $2 ] && [ $2 == "nolog" ];then
+		java $JAVA_OPTS -classpath $CLASS_PATH -Duser.dir=$DIR $SYSTEM_PROPERTY $MAIN_CLASS $OTHER_SCF_CONFIG -Dscf.service.name=$SERVICE_NAME >> /dev/null 2>&1 &
+		echo $! > "$PID_PATH"/"$SERVICE_NAME"
+	else
+		java $JAVA_OPTS -classpath $CLASS_PATH -Duser.dir=$DIR $SYSTEM_PROPERTY $MAIN_CLASS $OTHER_SCF_CONFIG -Dscf.service.name=$SERVICE_NAME >> /dev/null 2>&1 & 
+		echo pid:$! 
+
+		echo $! > "$PID_PATH"/"$SERVICE_NAME"
+	fi
+}
+
+
+
+#scf restart func
+function scf_restart_func()
+{
+	RESTART_USAGE="scf <restart> <service-name> <delay-time>"
+# if no args specified, show usage
+	if [ $# -lt 1 ]; then
+		echo $RESTART_USAGE
+		exit 1
+	fi	
+
+# get arguments
+	SERVICE_NAME=$1
+	CONTROL_TIME=$2
+
+	cd $SCF_DIR/bin
+
+	case x$2 in
+	x[0-9]*)
+	;;
+	*)
+		echo "please input time num"
+		CONTROL_TIME=1
+	;;
+	esac 
+
+	DIR=$SCF_DIR/bin
+	PID_FILE="$DIR"/../tmp/pid/"$SERVICE_NAME"
+
+	if [ ! -e $PID_FILE ]; then
+		echo "pid file($PID_FILE) not exits"
+		scf_start_func $SERVICE_NAME
+	fi
+
+	cd $(dirname "$0")
+
+#send reboot signal
+	kill -12 `cat $PID_FILE`
+	echo "kill -12 `cat $PID_FILE`"
+
+#sleep time 
+	echo ""$CONTROL_TIME" seconds after restart service"
+	sleep `expr $CONTROL_TIME`
+
+#shutdown this server
+	kill -15 `cat $PID_FILE` >> /dev/null 2>&1
+	echo "kill -15 `cat $PID_FILE`"
+
+	loop_time=30
+	while (( $loop_time>0 ))
+	do
+		kill -0 `cat $PID_FILE` >> /dev/null 2>&1
+		if [ $? -eq 0 ];then
+			echo "waiting for process killed"
+			let loop_time-=1
+		else
+			break
+		fi
+		sleep 1
+	done
+
+	rm -rf $PID_FILE
+
+#start this server
+	lastargs=${!#}
+	if [[ $lastargs == "nolog" ]];then
+		scf_start_func $SERVICE_NAME $lastargs
+	else
+	 	scf_start_func $SERVICE_NAME
+	fi
+}
+
+#scf restart now function
+function scf_restart_now_func()
+{
+	RESTART_USAGE="scf <restart_now> <service-name> <delay-time>"
+	if [ $# -lt 1 ];then
+		echo $RESTART_USAGE
+		exit 1
+	fi
+#get parameters
+	SERVICE_NAME=$1
+        CONTROL_TIME=$2
+
+        cd $SCF_DIR/bin
+
+        case x$2 in
+        x[0-9]*)
+        ;;
+        *)
+                echo "please input time num"
+                CONTROL_TIME=1
+        ;;
+        esac
+
+        DIR=$SCF_DIR/bin
+        PID_FILE="$DIR"/../tmp/pid/"$SERVICE_NAME"
+
+        if [ ! -e $PID_FILE ]; then
+                echo "pid file($PID_FILE) not exits"
+                exit 1
+        fi
+
+        cd $(dirname "$0")
+
+#send reboot signal
+        kill -12 `cat $PID_FILE`
+        echo "kill -12 `cat $PID_FILE`"
+
+#sleep time
+        echo ""$CONTROL_TIME" seconds after restart service"
+        sleep `expr $CONTROL_TIME`
+
+#shutdown this server
+        kill -9 `cat $PID_FILE`
+        echo "kill -9 `cat $PID_FILE`"
+        rm -rf $PID_FILE
+
+
+#start this server
+        scf_start_func $SERVICE_NAME
+}
+
+#scf shutdown function
+function scf_shutdown_func()
+{
+	SHUTDOWN_USAGE="scf <shutdown> <service-name>"
+# if no args specified, show usage
+	arg=nolog
+	if [ $# -lt 1 ]; then
+		echo $SHUTDOWN_USAGE
+	    exit 1
+	fi
+
+# get arguments
+	SERVICE_NAME=$1
+
+	DIR=$SCF_DIR/bin
+	PID_FILE="$DIR"/../tmp/pid/"$SERVICE_NAME"
+
+	if [ ! -e $PID_FILE ]; then
+	  echo "pid file($PID_FILE) not exits"
+	  exit 1
+	fi
+
+	echo "kill pid: `cat $PID_FILE`"
+	kill -15 `cat $PID_FILE`
+	rm -rf $PID_FILE
+}
+
+#scf shutdown now function
+function scf_shutdown_now_func()
+{
+        SHUTDOWN_USAGE="scf <shutdown_now> <service-name>"
+# if no args specified, show usage
+        if [ $# -lt 1 ]; then
+                echo $SHUTDOWN_USAGE
+            exit 1
+        fi
+
+
+# get arguments
+        SERVICE_NAME=$1
+
+        DIR=$SCF_DIR/bin
+        PID_FILE="$DIR"/../tmp/pid/"$SERVICE_NAME"
+
+        if [ ! -e $PID_FILE ]; then
+          echo "pid file($PID_FILE) not exits"
+          exit 1
+        fi
+
+        echo "kill pid: `cat $PID_FILE`"
+        kill -9 `cat $PID_FILE`
+        rm -rf $PID_FILE
+}
+
+# scf jstat function
+function scf_jstat_func()
+{
+	JSTAT_USAGE="Usage: scf jstat [-<option>] [<server-name | pid>] [<interval-time> ms] [<count>]"
+#process ID
+	OPTION=$1
+	PID=""
+#time interval util:ms
+	TIME=""
+	COUNT=""
+
+	if [ "$OPTION" ];then
+		if [ ${OPTION:0:1} = "-" ];then
+			if [ ${OPTION:1:2} != "h" ];then
+				PID=$2
+				TIME=$3
+				COUNT=$4
+			else
+				PID=$1
+				TIME=$2
+				COUNT=$3
+			fi
+		else
+			OPTION="-gc"
+			PID=$1
+			TIME=$2
+			COUNT=$3
+		fi
+	else
+		echo $JSTAT_USAGE
+		exit 1   
+	fi
+
+	if [ $PID == "-h" ]; then
+		echo "Usage:jstack -h|server-name|pid"
+		echo "    jstack [-<option>] [<server-name | pid>] [<interval-time> ms] [<count>]"
+		echo "Definitions:"
+		echo "    <option>: -gc | -class | -gccause | -gcutil | -gcpermcapacity | -gccapacity 
+			  -gcnew | -gcnewcapacity | -gcold | -gcoldcapacity 
+			  -compiler | -printcompilation
+			default -gc"
+		echo "    <server-name>:this server name"
+		echo "    <pid>:this server process id"
+		echo "    <interval-time>: Sampling interval The following forms are allowed:
+			       <n>['ms']
+				   Where <n> is an integer and the suffix specifies 
+				 the units as milliseconds('ms') . The default units are 'ms'."
+		exit 1
+	fi
+
+	case x$PID in
+	x[0-9]*)
+	;;
+	*)
+		PID=`ps -ef|grep -v grep|grep =$PID |sed -n 1p |awk '{print $2}'`
+	;;
+	esac
+
+	if [ "$PID" = "" ];then
+		echo "Not this server or PID!"
+		exit 1
+	fi
+
+	if [ "$TIME" ]; then
+		case x$TIME in
+		x[0-9]*)
+		;;
+		 *)
+			echo "please input time num!"
+			exit 1
+		;;
+		esac
+	fi
+
+	if [ "$COUNT" ]; then
+		case x$COUNT in
+		x[0-9]*)
+		 ;;
+		*)
+			echo "please input count num!"
+			exit 1
+		;;
+		esac
+	fi
+
+
+	jstat $OPTION $PID $TIME $COUNT
+}
+
+
+
+#scf jstack function
+function scf_jstack_func()
+{
+	JSTACK_USAGE="scf <jstack> <service-name | service-pid> <count>"
+#if no args specified, show usage
+	if [ $# -ne 2 ]; then
+		echo $JSTACK_USAGE
+	  exit 1
+	fi
+
+	PID=$1
+	COUNT=$2
+	DATE=`date +%Y%m%d%H%M%S`
+
+	case x$PID in
+	x[0-9]*)
+		service_name=`ps -ef|grep java|grep $1|sed 's#.*Dscf.service.name=\(.*\)#\1#g'`
+		echo $PID
+	;;
+	*)
+		service_name=$PID
+		PID=`ps -ef|grep -v grep|grep =$PID |sed -n 1p |awk '{print $2}'`
+	;;
+	esac
+
+	case x$COUNT in
+	x[0-9]*)
+	;;
+	*)
+		echo "Not this server or PID!"
+		exit 1
+	;;
+	esac
+
+	if [ "$PID" = "" ];then
+		echo "Not this server or PID!"
+		exit 1
+	fi
+
+	FILE_URL=$SCF_DIR/log/$service_name/jt_$DATE
+	for((i=0;i<$COUNT;i++));do
+		echo "jstack $PID > $FILE_URL"_"$i.log"
+		jstack $PID > $FILE_URL"_"$i.log
+	done
+}
+
+#scf auto detect function
+function scf_detect_func() 
+{
+	service_dir="$1/../service/deploy";
+	for service in $service_dir/*; do
+		service_name=`echo $service|awk -F'/' '{print $8}'`
+		config_file=$service/scf_config.xml
+		if [[ ! -f $config_file ]];then
+			continue;
+		fi
+		pid_id=`ps -ef|grep "scf"|grep -v "grep"|grep "=$service_name$"|sed -n 1p|awk '{print $2}'`
+
+		if [ "$pid_id" = "" ]; then
+		    echo "starting $service_name"
+			scf_start_func $service_name
+		fi
+
+	done
+}
+
+#scf list function
+function scf_list_func ()
+{
+	service_dir="$1/../service/deploy";
+	printf "%-15s %-6s %-6s %-6s %-10s %-10s\n" ServiceName VM_XMS VM_XMX VM_XMN ServiceID Status
+	for service in $service_dir/*; do
+		service_name=`echo $service|awk -F'/' '{print $8}'`
+		JVM_PATH=$service_dir/$service_name/scf_config.xml
+		if [[ ! -f $JVM_PATH ]];then
+			continue;
+		fi
+		VM_XMS=`cat $JVM_PATH | sed 's#\(.*\)>\(.*\)#\1>#g' |awk '/scf.server.vm.xms/{getline;print}' | sed 's#<value>\(.*\)</value>#\1#g'|sed 's/^M//g'` 
+		if [[ $VM_XMS == "" ]];then
+			VM_XMS=2g
+		fi
+		VM_XMX=`cat $JVM_PATH | sed 's#\(.*\)>\(.*\)#\1>#g' |awk '/scf.server.vm.xmx/{getline;print}' | sed 's#<value>\(.*\)</value>#\1#g'|sed 's/^M//g'` 
+		if [[ $VM_XMX == "" ]];then
+			VM_XMX=2g
+		fi
+		VM_XMN=`cat $JVM_PATH | sed 's#\(.*\)>\(.*\)#\1>#g' |awk '/scf.server.vm.xmn/{getline;print}' | sed 's#<value>\(.*\)</value>#\1#g'|sed 's/^M//g'` 
+		if [[ $VM_XMN == "" ]];then
+			VM_XMN=1g
+		fi
+
+		pid_id=`ps -ef|grep scf|grep -v grep|grep =$service_name$|awk '{print $2}'`	
+		if [ "$pid_id" = "" ];then
+			printf "%-15s %-6s %-6s %-6s %-10s %-10s\n" $service_name $VM_XMS $VM_XMX $VM_XMN NULL STOP
+			continue
+		fi
+
+		printf "%-15s %-6s %-6s %-6s %-10s %-10s\n" $service_name $VM_XMS $VM_XMX $VM_XMN $pid_id RUNNING
+	done
+}
+
+#scf telnet function
+function scf_telnet_func()
+{
+	COUNT_USAGE="scf <telnet> <server name>"
+	
+	if [ $# -ne 2 ]; then
+		echo $COUNT_USAGE
+		exit 1
+	fi
+
+	scf_conf=$2/../service/deploy/$1/scf_config.xml
+#get local_ip and service-port
+	local_ip=`cat $scf_conf|sed 's#\(.*\)>\(.*\)#\1>#g'|awk /scf.server.tcp.listenIP/'{getline;print}'|sed 's#<value>\(.*\)</value>#\1#g'|sed 's/^M//g'`
+	port=`cat $scf_conf|sed 's#\(.*\)>\(.*\)#\1>#g'|awk /scf.server.telnet.listenPort/'{getline;print}'|sed 's#<value>\(.*\)</value>#\1#g'|sed 's/^M//g'`
+
+	if [[ "$local_ip" == "" ]];then
+	    base_conf=$2/../conf/scf_config.xml
+	    local_ip=`cat $base_conf|sed 's#\(.*\)>\(.*\)#\1>#g'|awk /scf.server.tcp.listenIP/'{getline;print}'|sed 's#<value>\(.*\)</value>#\1#g'|sed 's/^M//g'`
+	fi
+
+	if [[ "$port" == "" ]];then
+	    port=`cat $scf_conf|sed 's#\(.*\)>\(.*\)#\1>#g'|awk /scf.server.tcp.listenPort/'{getline;print}'|sed 's#<value>\(.*\)</value>#\1#g'|sed 's/^M//g'`
+	    port=`expr $port + 10000`
+	 fi
+	telnet $local_ip $port
+}
+
+
+#scf redirect log function
+function scf_log_func()
+{
+	LOG_USAGE="scf log <server name> <times> <other-param>"
+#wait base_time to guarantee we have connected by telnet
+	base_time=10
+
+	if [ $# -lt 3 ]; then
+		echo $LOG_USAGE
+		exit 1
+	fi
+
+	DATE=$(date +%Y%m%d%H%M%S)
+	param=$4
+	if [ ! -d $2/../log/$1 ];then
+		mkdir -p $2/../log/$1
+	fi
+	scf_conf=$2/../service/deploy/$1/scf_config.xml
+	pid_info=`cat $2/../tmp/pid/$1`
+
+	if [ "$pid_info" != "" ];then
+		tmp_file=$2/../log/$1/telnet_$DATE.log
+	else
+		echo "service is not lived"
+		exit 1
+	fi
+#get local_ip and service-port
+	local_ip=`cat $scf_conf|sed 's#\(.*\)>\(.*\)#\1>#g'|awk /scf.server.tcp.listenIP/'{getline;print}'|sed 's#<value>\(.*\)</value>#\1#g'|sed 's/^M//g'`
+	port=`cat $scf_conf|sed 's#\(.*\)>\(.*\)#\1>#g'|awk /scf.server.telnet.listenPort/'{getline;print}'|sed 's#<value>\(.*\)</value>#\1#g'|sed 's/^M//g'`
+
+	if [[ "$local_ip" == "" ]];then
+		base_conf=$2/../conf/scf_config.xml
+		local_ip=`cat $base_conf|sed 's#\(.*\)>\(.*\)#\1>#g'|awk /scf.server.tcp.listenIP/'{getline;print}'|sed 's#<value>\(.*\)</value>#\1#g'|sed 's/^M//g'`
+	fi
+
+	if [[ "$port" == "" ]];then
+		port=`cat $scf_conf|sed 's#\(.*\)>\(.*\)#\1>#g'|awk /scf.server.tcp.listenPort/'{getline;print}'|sed 's#<value>\(.*\)</value>#\1#g'|sed 's/^M//g'`
+		port=`expr $port + 10000`
+	fi
+
+	if [ "$param" == "" ]; then
+		param="_"
+	fi
+		
+	(echo ""; sleep $base_time;echo "time|grep $param";sleep $3)|telnet $local_ip $port | egrep -v 'Trying|Connected|Escape character'>> $tmp_file
+
+	cat $tmp_file |grep 'fromIP:'|awk -F : '{++ips[$2]} END {for(key in ips) print key,"\t",ips[key]}'
+}
+
+#init scf-script environment
+function scf_init()
+{
+	env_path=`echo $PATH|grep '/opt/scf/bin'`
+	if [[ "$env_path" == "" ]];then
+		first_flag=`grep "export SCF_BIN" ~/.bash_profile`
+		if [[ $first_flag == "" ]];then
+			echo 'SCF_BIN=/opt/scf/bin' >> ~/.bash_profile;
+			echo 'export SCF_BIN' >> ~/.bash_profile;
+			echo 'PATH=$PATH:$SCF_BIN' >> ~/.bash_profile;
+			echo 'export PATH' >> ~/.bash_profile;
+			source ~/.bash_profile
+		fi
+	fi
+}
+
+#check SCF_BIN environment
+function scf_check()
+{
+	env_path=`echo $PATH|grep '/opt/scf/bin'`
+	if [[ "$env_path" == "" ]];then
+		echo "environment not ready"
+	else 
+		echo "environment ok"
+	fi
+}
+
+function scf_op()
+{
+	case "$1" in
+	-v|version )
+	cat "$VERSION_FILE" 
+	echo "start shell version is $START_VERSION"
+	;;
+	-?|help )
+	echo "$USAGE" 
+	;;
+	init )
+	scf_init
+	;;
+	check )
+	scf_check
+	;;
+	list )
+	scf_list_func $CURR_DIR;
+	;;
+	detect )
+	scf_detect_func $CURR_DIR;
+	;;
+	telnet )
+	scf_telnet_func $2 $CURR_DIR;
+	;;
+	log )
+	scf_log_func $2 $CURR_DIR $3 $4;
+	;;
+	start )
+	scf_start_func $2 $3;
+	;;
+	restart )
+	scf_restart_func $2 $3 $4;
+	;;
+	restart_now )
+	scf_restart_now_func $2 $3;
+	;;
+	shutdown )
+	scf_shutdown_func $2 $3 ;
+	;;
+	shutdown_now )
+	scf_shutdown_now_func $2;
+	;;
+	jstack )
+	scf_jstack_func $2 $3 $4;
+	;;
+	jstat )
+	scf_jstat_func $2 $3 $4 $5;
+	;;
+	* )
+	echo "$USAGE";
+	;;
+esac
+}
+
+
+#main function
+if [ $# -lt 1 ]; then
+	echo "$USAGE"
+	exit 1
+fi
+
+CURR_DIR=$SCF_DIR/bin;
+VERSION_FILE="$CURR_DIR/../README";
+START_VERSION="2.0"
+ASYN_LOG="false"
+ASYN_LOG_QUEUE_SIZE=0
+if [ $1 == "-a" ]; then
+    ASYN_LOG="true"
+	if [[ "$2" =~ ^[0-9]+$ ]] ; then
+		ASYN_LOG_QUEUE_SIZE=$2
+		scf_op $3 $4 $5 $6 $7
+	else
+		scf_op $2 $3 $4 $5 $6
+	fi
+else 
+	scf_op $1 $2 $3 $4 $5
+fi
+
