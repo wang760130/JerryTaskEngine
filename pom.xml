@@ -51,7 +51,6 @@
 		
 		<plugins>
 			<!-- 跳过单元测试 -->
-			<!--  
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-surefire-plugin</artifactId>
@@ -59,7 +58,6 @@
 					<skip>true</skip>
 				</configuration>
 			</plugin>
-			-->
 			
 			 <!-- 设置源文件编码方式 -->  
 			<plugin>
